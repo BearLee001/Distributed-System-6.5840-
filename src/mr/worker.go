@@ -1,13 +1,18 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-import "os"
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+)
 
-
-// Map functions return a slice of KeyValue.
+// KeyValue Map functions return a slice of KeyValue.
 type KeyValue struct {
 	Key   string
 	Value string
@@ -23,44 +28,94 @@ func ihash(key string) int {
 
 var coordSockName string // socket for coordinator
 
-
 // main/mrworker.go calls this function.
 func Worker(sockname string, mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	coordSockName = sockname
 
-	// Your worker implementation here.
+	for {
+		work, err := requestTasksFromCoordinator()
+		if err != nil {
+			fmt.Println("Failed to ask for works")
+		}
+		switch {
+		case work.TaskType == 1: // map task
+			input_file := work.FileName
+			content, err := os.ReadFile(input_file)
+			if err != nil {
+				fmt.Println("Failed to ask for works!!!")
+			}
+			kvs := mapf(input_file /* not used */, string(content))
+			taskID := work.TaskID
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+			// write kvs to file
+			// Note: Not production-safe, but efficient for now.
+			if writeKVs2File(kvs, work.NReduce, taskID) == nil {
+				reportWorkDone(1 /* map task */, taskID)
+			}
+		case work.TaskType == 2: // reduce task
+			// handle tmp-[mapID]-taskID
+			grouped, err := normalizeKV(work.NMap, work.TaskID)
+			keys := make([]string, 0, len(grouped))
+			for k := range grouped {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			if err != nil {
+				fmt.Println(err)
+				return
+			} else {
+				of, _ := os.Create(fmt.Sprintf("mr-out-%d", work.TaskID))
+				bw := bufio.NewWriter(of)
+				for _, k := range keys {
+					v2 := reducef(k, grouped[k]) // (hello, [1, 1, 1, 1]) -> 4
+					bw.WriteString(k)
+					bw.WriteByte(' ')
+					bw.WriteString(v2)
+					bw.WriteByte('\n')
+				}
+				bw.Flush()
+				of.Close()
+				reportWorkDone(2 /* reduce task*/, work.TaskID)
+			}
+		case work.TaskType == 3: // all task done, don't ask for help
 
+		case work.TaskType == 4: // no available tasks, waiting...
+
+		default:
+			fmt.Println(work)
+		}
+	}
 }
 
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
+func requestTasksFromCoordinator() (WorkInfoReply, error) {
+	args := RequestWorkArgs{}
+	reply := WorkInfoReply{}
 
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
+	ok := call("Coordinator.RequestTask", &args, &reply)
 	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
+		return reply, nil
+	} else {
+		// should never go here
+		fmt.Printf("call failed!\n")
+		return WorkInfoReply{}, fmt.Errorf("call failed")
+	}
+}
+
+func reportWorkDone(taskType int, taskID int) (WorkInfoReply, error) {
+	args := RequestWorkArgs{
+		TaskType: taskType,
+		TaskID:   taskID,
+	}
+	reply := WorkInfoReply{}
+
+	ok := call("Coordinator.ReportWorkDone", &args, &reply)
+	if ok {
+		return reply, nil
 	} else {
 		fmt.Printf("call failed!\n")
+		return WorkInfoReply{}, fmt.Errorf("call failed")
 	}
 }
 
@@ -80,4 +135,65 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	}
 	log.Printf("%d: call failed err %v", os.Getpid(), err)
 	return false
+}
+
+func writeKVs2File(kvs []KeyValue, n int, taskID int) error {
+	buckets := make([][]KeyValue, n)
+	for _, kv := range kvs {
+		r := ihash(kv.Key) % n
+		buckets[r] = append(buckets[r], kv)
+	}
+	for r := 0; r < n; r++ {
+		name := fmt.Sprintf("tmp-%d-%d", taskID, r)
+
+		f, err := os.Create(name)
+		if err != nil {
+			return err
+		}
+
+		enc := json.NewEncoder(f)
+		for _, kv := range buckets[r] {
+			if err := enc.Encode(&kv); err != nil {
+				f.Close()
+				return err
+			}
+		}
+		f.Close()
+	}
+	return nil
+}
+
+// grouped:
+// {(hello, [1, 1, 1, 1]), (world, [1, 1, 1, 1])}
+
+func normalizeKV(taskSize int, suffix int) (map[string][]string, error) {
+	grouped := make(map[string][]string)
+	for i := 0; i < taskSize; i++ {
+		name := fmt.Sprintf("tmp-%d-%d", i, suffix)
+		f, err := os.Open(name)
+		if err != nil {
+			fmt.Println("failed to open file: ", name)
+			return grouped, err
+		}
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			err := dec.Decode(&kv)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				f.Close()
+				return nil, fmt.Errorf("decode %s: %w", name, err)
+			}
+			if kv.Value != "1" {
+				f.Close()
+				return nil, fmt.Errorf("unexpected value in %s: key=%q value=%q", name, kv.Key, kv.Value)
+			}
+			grouped[kv.Key] = append(grouped[kv.Key], kv.Value)
+		}
+		f.Close()
+	}
+
+	return grouped, nil
 }
