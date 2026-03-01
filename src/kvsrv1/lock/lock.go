@@ -11,16 +11,17 @@ type Lock struct {
 	// MakeLock().
 	ck kvtest.IKVClerk
 	// You may add code here
+	id string
 }
 
-// The tester calls MakeLock() and passes in a k/v clerk; your code can
+// MakeLock The tester calls MakeLock() and passes in a k/v clerk; your code can
 // perform a Put or Get by calling lk.ck.Put() or lk.ck.Get().
 //
 // This interface supports multiple locks by means of the
 // lockname argument; locks with different names should be
 // independent.
 func MakeLock(ck kvtest.IKVClerk, lockname string) *Lock {
-	lk := &Lock{ck: ck}
+	lk := &Lock{ck: ck, id: lockname}
 	// You may add code here
 	return lk
 }
