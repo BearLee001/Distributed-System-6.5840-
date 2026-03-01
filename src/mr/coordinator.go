@@ -54,7 +54,6 @@ func (c *Coordinator) RequestTask(args *RequestWorkArgs, reply *WorkInfoReply) e
 		// check time out
 		tmp, e := c.reAssignTask(c.nMap, c.inProcessMaps)
 		if e != nil {
-			fmt.Println("No idle map tasks.")
 			*reply = WorkInfoReply{
 				TaskType: 4,
 			}

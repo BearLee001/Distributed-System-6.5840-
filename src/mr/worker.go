@@ -37,7 +37,7 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 	for {
 		work, err := requestTasksFromCoordinator()
 		if err != nil {
-			fmt.Println("Failed to ask for works")
+			return
 		}
 		switch {
 		case work.TaskType == 1: // map task
@@ -66,25 +66,24 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 				fmt.Println(err)
 				return
 			} else {
-				of, _ := os.Create(fmt.Sprintf("mr-out-%d", work.TaskID))
-				bw := bufio.NewWriter(of)
-				for _, k := range keys {
-					v2 := reducef(k, grouped[k]) // (hello, [1, 1, 1, 1]) -> 4
-					bw.WriteString(k)
-					bw.WriteByte(' ')
-					bw.WriteString(v2)
-					bw.WriteByte('\n')
-				}
-				bw.Flush()
-				of.Close()
+				finalName := fmt.Sprintf("mr-out-%d", work.TaskID)
+				atomicWriteFile(finalName, func(w io.Writer) error {
+					for _, k := range keys {
+						v2 := reducef(k, grouped[k])
+						w.Write([]byte(k))
+						w.Write([]byte(" "))
+						w.Write([]byte(v2))
+						w.Write([]byte("\n"))
+					}
+					return nil
+				})
 				reportWorkDone(2 /* reduce task*/, work.TaskID)
 			}
 		case work.TaskType == 3: // all task done, don't ask for help
+			return
 
 		case work.TaskType == 4: // no available tasks, waiting...
-
 		default:
-			fmt.Println(work)
 		}
 	}
 }
@@ -98,7 +97,6 @@ func requestTasksFromCoordinator() (WorkInfoReply, error) {
 		return reply, nil
 	} else {
 		// should never go here
-		fmt.Printf("call failed!\n")
 		return WorkInfoReply{}, fmt.Errorf("call failed")
 	}
 }
@@ -114,7 +112,6 @@ func reportWorkDone(taskType int, taskID int) (WorkInfoReply, error) {
 	if ok {
 		return reply, nil
 	} else {
-		fmt.Printf("call failed!\n")
 		return WorkInfoReply{}, fmt.Errorf("call failed")
 	}
 }
@@ -144,21 +141,28 @@ func writeKVs2File(kvs []KeyValue, n int, taskID int) error {
 		buckets[r] = append(buckets[r], kv)
 	}
 	for r := 0; r < n; r++ {
-		name := fmt.Sprintf("tmp-%d-%d", taskID, r)
-
-		f, err := os.Create(name)
+		finalName := fmt.Sprintf("mr-%d-%d", taskID, r)
+		tmp, err := os.CreateTemp(".", fmt.Sprintf("mr-%d-%d-*", taskID, r))
 		if err != nil {
 			return err
 		}
-
-		enc := json.NewEncoder(f)
+		tmpName := tmp.Name()
+		enc := json.NewEncoder(tmp)
 		for _, kv := range buckets[r] {
 			if err := enc.Encode(&kv); err != nil {
-				f.Close()
+				tmp.Close()
+				_ = os.Remove(tmpName)
 				return err
 			}
 		}
-		f.Close()
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmpName)
+			return err
+		}
+		if err := os.Rename(tmpName, finalName); err != nil {
+			_ = os.Remove(tmpName)
+			return err
+		}
 	}
 	return nil
 }
@@ -169,7 +173,7 @@ func writeKVs2File(kvs []KeyValue, n int, taskID int) error {
 func normalizeKV(taskSize int, suffix int) (map[string][]string, error) {
 	grouped := make(map[string][]string)
 	for i := 0; i < taskSize; i++ {
-		name := fmt.Sprintf("tmp-%d-%d", i, suffix)
+		name := fmt.Sprintf("mr-%d-%d", i, suffix)
 		f, err := os.Open(name)
 		if err != nil {
 			fmt.Println("failed to open file: ", name)
@@ -186,14 +190,39 @@ func normalizeKV(taskSize int, suffix int) (map[string][]string, error) {
 				f.Close()
 				return nil, fmt.Errorf("decode %s: %w", name, err)
 			}
-			if kv.Value != "1" {
-				f.Close()
-				return nil, fmt.Errorf("unexpected value in %s: key=%q value=%q", name, kv.Key, kv.Value)
-			}
 			grouped[kv.Key] = append(grouped[kv.Key], kv.Value)
 		}
 		f.Close()
 	}
 
 	return grouped, nil
+}
+
+func atomicWriteFile(final string, write func(io.Writer) error) error {
+	tmp, err := os.CreateTemp(".", "tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	bw := bufio.NewWriter(tmp)
+
+	if err := write(bw); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+
+	if err := bw.Flush(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+
+	return os.Rename(tmpName, final)
 }
