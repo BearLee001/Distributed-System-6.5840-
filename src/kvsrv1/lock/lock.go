@@ -2,6 +2,7 @@ package lock
 
 import (
 	"fmt"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
@@ -46,6 +47,7 @@ func (lk *Lock) Acquire() {
 				return
 			}
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
