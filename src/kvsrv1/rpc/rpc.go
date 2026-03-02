@@ -15,9 +15,7 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrWrongGroup  = "ErrWrongGroup"
 
-	// for lock state
 	LOCK_IDLE = "IDLE"
-	LOCK_BUSY = "BUSY"
 )
 
 type Tversion uint64

@@ -70,9 +70,9 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 				return rpc.ErrMaybe
 			}
 			return reply.Err
-		} else {
-			retried = true
 		}
+
+		retried = true
 		time.Sleep(100 * time.Millisecond)
 	}
 }

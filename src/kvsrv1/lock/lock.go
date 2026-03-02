@@ -1,7 +1,6 @@
 package lock
 
 import (
-	"fmt"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -18,7 +17,7 @@ type Lock struct {
 	id string
 	v  rpc.Tversion
 
-	hash string // ?
+	who string // ?
 }
 
 // MakeLock The tester calls MakeLock() and passes in a k/v clerk; your code can
@@ -28,7 +27,7 @@ type Lock struct {
 // lockname argument; locks with different names should be
 // independent.
 func MakeLock(ck kvtest.IKVClerk, lockname string) *Lock {
-	lk := &Lock{ck: ck, id: lockname, v: 0, hash: kvtest.RandValue(8)}
+	lk := &Lock{ck: ck, id: lockname, v: 0, who: kvtest.RandValue(8)}
 	// You may add code here
 	return lk
 }
@@ -36,12 +35,17 @@ func MakeLock(ck kvtest.IKVClerk, lockname string) *Lock {
 func (lk *Lock) Acquire() {
 	for {
 		state, v, err := lk.ck.Get(lk.id)
+		if err == rpc.OK && state == lk.who {
+			lk.updateV(v)
+			return
+		}
 		if err == rpc.OK && state == rpc.LOCK_IDLE || err == rpc.ErrNoKey { /* idle or never-locked */
 			if !(err == rpc.ErrNoKey) {
 				lk.updateV(v)
 			}
 			/* If another process performs a Put first, the server's version will be updated and it will return ErrVersion */
-			if lk.ck.Put(lk.id, rpc.LOCK_BUSY, lk.v) == rpc.OK {
+			replyErr := lk.ck.Put(lk.id, lk.who, lk.v)
+			if replyErr == rpc.OK {
 				//fmt.Println(lk.id + "got the lock!!!")
 				lk.increment()
 				return
@@ -53,17 +57,21 @@ func (lk *Lock) Acquire() {
 
 func (lk *Lock) Release() {
 	//fmt.Println(lk.id + " try to release the lock!!!")
-	state, v, err := lk.ck.Get(lk.id)
-	if err == rpc.OK {
-		if state == rpc.LOCK_BUSY && v == lk.v {
-			if lk.ck.Put(lk.id, rpc.LOCK_IDLE, lk.v) == rpc.OK {
-				lk.increment()
+	for {
+		who, v, err := lk.ck.Get(lk.id)
+		if err == rpc.OK {
+			if who == lk.who && v == lk.v {
+				replyErr := lk.ck.Put(lk.id, rpc.LOCK_IDLE, lk.v)
+				if replyErr == rpc.OK {
+					lk.increment()
+					return
+				}
+			} else {
+				// Unreachable. Why would the process release a lock that it doesn't own?
 				return
 			}
 		}
 	}
-	// Unreachable. Why would the process release a lock that it doesn't own?
-	fmt.Println("No!!!")
 }
 
 func (lk *Lock) updateV(newV rpc.Tversion) {
