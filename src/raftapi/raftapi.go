@@ -6,15 +6,16 @@ type Raft interface {
 	// for that entry, the term, and whether the peer is the leader.
 	Start(command interface{}) (int, int, bool)
 
-	// Ask a Raft for its current term, and whether it thinks it is
+	// GetState Ask a Raft for its current term, and whether it thinks it is
 	// leader
 	GetState() (int, bool)
 
-	// For Snaphots (3D)
+	// Snapshot For Snapshots (3D)
 	Snapshot(index int, snapshot []byte)
 	PersistBytes() int
 }
 
+// ApplyMsg
 // As each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the server (or
 // tester), via the applyCh passed to Make(). Set CommandValid to true

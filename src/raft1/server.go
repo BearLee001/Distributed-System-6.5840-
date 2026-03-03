@@ -10,13 +10,13 @@ import (
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
-
 )
 
 const (
 	SnapShotInterval = 10
 )
 
+// Itester
 // The interface from a server (each one runs inside its own process)
 // to the tester (which runs inside a separate process).
 type Itester interface {
