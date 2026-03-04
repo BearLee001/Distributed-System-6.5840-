@@ -50,7 +50,7 @@ type Raft struct {
 
 	granted int
 
-	canGrant bool
+	votedFor int
 }
 type DebugMutex struct {
 	mu   sync.Mutex
@@ -159,12 +159,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Success = true
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.canGrant = true
+		rf.votedFor = -1
 		rf.state = PEER_FOLLOWER
 	}
-	if rf.canGrant {
+	if rf.votedFor == -1 {
 		reply.VoteGranted = true
-		rf.canGrant = false
+		rf.votedFor = args.Whoami
 	} else {
 		DPrintf("[RequestVote] failed reason -> cannot grant\n")
 		reply.VoteGranted = false
@@ -191,7 +191,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//DPrintf("[AppendEntries] peer %v set FOLLOWER\n", rf.me)
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
-			rf.canGrant = true
+			rf.votedFor = -1
 		}
 		rf.state = PEER_FOLLOWER
 		rf.resetAlarm()
@@ -300,7 +300,7 @@ func (rf *Raft) follower() {
 			rf.state = PEER_CANDIDATE
 			rf.currentTerm++
 			rf.granted = 1
-			rf.canGrant = false
+			rf.votedFor = rf.me
 			curTerm := rf.currentTerm
 			whoami := rf.me
 			rf.mu.Unlock() // TODO: Unlock
@@ -374,7 +374,7 @@ func (rf *Raft) candidate() {
 	rf.mu.Lock() // TODO: Lock
 	rf.currentTerm++
 	rf.granted = 1
-	rf.canGrant = false
+	rf.votedFor = rf.me
 	whoami := rf.me
 	term := rf.currentTerm
 	rf.mu.Unlock() // TODO: Unlock
@@ -422,7 +422,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = PEER_FOLLOWER
 	rf.todo = applyCh
 	rf.resetAlarm()
-	rf.canGrant = true
+	rf.votedFor = -1
 	rf.mu.name = strconv.Itoa(me)
 	rand.Seed(time.Now().UnixNano())
 
