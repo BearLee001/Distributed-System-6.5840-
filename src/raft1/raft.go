@@ -164,7 +164,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Success = true
 	if args.Term > rf.currentTerm {
 		rf.updateTerm(args.Term)
-		rf.state = PEER_FOLLOWER
+		rf.setState(PEER_FOLLOWER)
 	}
 	if rf.votedFor == -1 {
 		reply.VoteGranted = true
@@ -193,7 +193,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.Term > rf.currentTerm {
 			rf.updateTerm(args.Term)
 		}
-		rf.state = PEER_FOLLOWER
+		rf.setState(PEER_FOLLOWER)
 		rf.resetAlarm()
 		reply.Success = true
 		return
@@ -303,7 +303,7 @@ func (rf *Raft) follower() {
 				rf.mu.Unlock() // TODO: Unlock
 				return
 			}
-			rf.state = PEER_CANDIDATE
+			rf.setState(PEER_CANDIDATE)
 			rf.currentTerm++
 			rf.granted = 1
 			rf.votedFor = rf.me
@@ -346,8 +346,7 @@ func (rf *Raft) requestVoteForme(who int, term int) {
 					// 5 -> 3; 6 -> 4
 					if rf.granted >= len(rf.peers)/2+1 {
 						DPrintf("[FOLLOWER] %v get vote from %v\n", rf.me, i)
-						rf.state = PEER_LEADER
-
+						rf.setState(PEER_LEADER)
 						rf.resetAlarm()
 						rf.mu.Unlock() // TODO: Unlock
 						//rf.declareLeader()
@@ -382,7 +381,7 @@ func (rf *Raft) candidate() {
 	wt := rf.wait
 	rf.mu.Unlock() // TODO: Unlock
 	if time.Since(to) > time.Duration(wt)*time.Millisecond {
-		rf.state = PEER_FOLLOWER
+		rf.setState(PEER_FOLLOWER)
 	}
 }
 
@@ -438,6 +437,10 @@ func (rf *Raft) updateTerm(target int) {
 	rf.currentTerm = target
 	rf.votedFor = -1
 	rf.granted = 0
+}
+
+func (rf *Raft) setState(s peerstate) {
+	rf.state = s
 }
 
 // Make
