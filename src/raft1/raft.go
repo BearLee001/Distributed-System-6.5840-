@@ -54,7 +54,7 @@ type Raft struct {
 }
 
 const (
-	HEADT_RACE = 100 * time.Millisecond
+	HEART_RACE = 100 * time.Millisecond
 )
 
 type DebugMutex struct {
@@ -298,6 +298,7 @@ func (rf *Raft) follower() {
 
 		if time.Since(to) > time.Duration(wt)*time.Millisecond {
 			rf.mu.Lock() // TODO: Lock
+			rf.resetAlarm()
 			if rf.state != PEER_FOLLOWER {
 				rf.mu.Unlock() // TODO: Unlock
 				return
@@ -374,20 +375,15 @@ func (rf *Raft) candidate() {
 	if !rf.checkState(PEER_CANDIDATE) {
 		return
 	}
-	rf.mu.Lock() // TODO: Lock
-	rf.currentTerm++
-	rf.granted = 1
-	rf.votedFor = rf.me
-	whoami := rf.me
-	term := rf.currentTerm
-	if rf.state != PEER_CANDIDATE {
-		rf.mu.Unlock() // TODO: Unlock
-		return
-	}
-	rf.mu.Unlock() // TODO: Unlock
 
-	DPrintf("[CANDIDATE] %v requestVote term = %v\n", whoami, term)
-	rf.requestVoteForme(whoami, term)
+	// election out: back to follower
+	rf.mu.Lock() // TODO: Lock
+	to := rf.lastContact
+	wt := rf.wait
+	rf.mu.Unlock() // TODO: Unlock
+	if time.Since(to) > time.Duration(wt)*time.Millisecond {
+		rf.state = PEER_FOLLOWER
+	}
 }
 
 func (rf *Raft) leader() {
@@ -399,13 +395,16 @@ func (rf *Raft) leader() {
 	curTerm := rf.currentTerm
 	t := rf.lastContact
 	rf.mu.Unlock() // TODO: Unlock
-	if time.Since(t) > HEADT_RACE {
+	if time.Since(t) > HEART_RACE {
 		rf.heartBeaten(whoami, curTerm)
 	}
 }
 
 func (rf *Raft) heartBeaten(whoami int, curTerm int) {
+	rf.mu.Lock() // TODO: Lock
 	rf.resetAlarm()
+	rf.mu.Unlock() // TODO: Unlock
+
 	for i := 0; i < len(rf.peers); i++ {
 		if i == whoami {
 			continue
