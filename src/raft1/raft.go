@@ -44,7 +44,7 @@ type Raft struct {
 	currentTerm int
 	state       peerstate
 	todo        chan raftapi.ApplyMsg
-	timeout     time.Time
+	lastContact time.Time
 
 	wait int
 
@@ -52,6 +52,11 @@ type Raft struct {
 
 	votedFor int
 }
+
+const (
+	HEADT_RACE = 100 * time.Millisecond
+)
+
 type DebugMutex struct {
 	mu   sync.Mutex
 	name string
@@ -158,8 +163,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Success = true
 	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.votedFor = -1
+		rf.updateTerm(args.Term)
 		rf.state = PEER_FOLLOWER
 	}
 	if rf.votedFor == -1 {
@@ -183,15 +187,11 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//DPrintf("[AppendEntries] %v -> %v\n", args.Who, rf.me)
 	rf.mu.Lock()         // TODO: Lock
 	defer rf.mu.Unlock() // TODO: Unlock
-	//DPrintf("[AppendEntries] leader term = %v, peer term = %v\n", args.Term, rf.currentTerm)
 	if args.HeartBeaten && args.Term >= rf.currentTerm {
-		//DPrintf("[AppendEntries] peer %v set FOLLOWER\n", rf.me)
 		if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-			rf.votedFor = -1
+			rf.updateTerm(args.Term)
 		}
 		rf.state = PEER_FOLLOWER
 		rf.resetAlarm()
@@ -261,7 +261,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-func (rf *Raft) ticker() {
+func (rf *Raft) raftLoop() {
 	for {
 		rf.mu.Lock() // TODO: Lock
 		state := rf.state
@@ -278,25 +278,30 @@ func (rf *Raft) ticker() {
 			DPrintf("[LEADAER] %v\n", whoami)
 			rf.leader()
 		}
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 func (rf *Raft) follower() {
+	if !rf.checkState(PEER_FOLLOWER) {
+		return
+	}
 	select {
 	case td := <-rf.todo:
 		fmt.Println(td)
 	default:
 		rf.mu.Lock() // TODO: Lock
-		to := rf.timeout
+		to := rf.lastContact
 		wt := rf.wait
 		rf.mu.Unlock() // TODO: Unlock
 
 		if time.Since(to) > time.Duration(wt)*time.Millisecond {
 			rf.mu.Lock() // TODO: Lock
+			if rf.state != PEER_FOLLOWER {
+				rf.mu.Unlock() // TODO: Unlock
+				return
+			}
 			rf.state = PEER_CANDIDATE
 			rf.currentTerm++
 			rf.granted = 1
@@ -330,7 +335,7 @@ func (rf *Raft) requestVoteForme(who int, term int) {
 					return
 				}
 				if reply.Success == false && rf.currentTerm < reply.Term {
-					rf.currentTerm = reply.Term
+					rf.updateTerm(reply.Term)
 					rf.resetAlarm()
 					rf.mu.Unlock()
 					return
@@ -341,8 +346,10 @@ func (rf *Raft) requestVoteForme(who int, term int) {
 					if rf.granted >= len(rf.peers)/2+1 {
 						DPrintf("[FOLLOWER] %v get vote from %v\n", rf.me, i)
 						rf.state = PEER_LEADER
+
+						rf.resetAlarm()
 						rf.mu.Unlock() // TODO: Unlock
-						rf.declareLeader()
+						//rf.declareLeader()
 						return
 					}
 					rf.mu.Unlock() // TODO: Unlock
@@ -360,23 +367,23 @@ func (rf *Raft) declareLeader() {
 	curTerm := rf.currentTerm
 	DPrintf("[LEADER] peer = %v, term = %v\n", whoami, curTerm)
 	rf.mu.Unlock() // TODO: Unlock
-	for i := 0; i < len(rf.peers); i++ {
-		if i == whoami {
-			continue
-		}
-		msg := AppendEntriesArgs{HeartBeaten: true, Term: curTerm, Who: whoami}
-		reply := AppendEntriesReply{}
-		rf.sendAppendEntries(i, &msg, &reply)
-	}
+	rf.heartBeaten(whoami, curTerm)
 }
 
 func (rf *Raft) candidate() {
+	if !rf.checkState(PEER_CANDIDATE) {
+		return
+	}
 	rf.mu.Lock() // TODO: Lock
 	rf.currentTerm++
 	rf.granted = 1
 	rf.votedFor = rf.me
 	whoami := rf.me
 	term := rf.currentTerm
+	if rf.state != PEER_CANDIDATE {
+		rf.mu.Unlock() // TODO: Unlock
+		return
+	}
 	rf.mu.Unlock() // TODO: Unlock
 
 	DPrintf("[CANDIDATE] %v requestVote term = %v\n", whoami, term)
@@ -384,23 +391,54 @@ func (rf *Raft) candidate() {
 }
 
 func (rf *Raft) leader() {
+	if !rf.checkState(PEER_LEADER) {
+		return
+	}
 	rf.mu.Lock() // TODO: Lock
 	whoami := rf.me
 	curTerm := rf.currentTerm
+	t := rf.lastContact
 	rf.mu.Unlock() // TODO: Unlock
+	if time.Since(t) > HEADT_RACE {
+		rf.heartBeaten(whoami, curTerm)
+	}
+}
+
+func (rf *Raft) heartBeaten(whoami int, curTerm int) {
+	rf.resetAlarm()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == whoami {
 			continue
 		}
 		msg := AppendEntriesArgs{HeartBeaten: true, Term: curTerm, Who: whoami}
 		reply := AppendEntriesReply{}
-		rf.sendAppendEntries(i, &msg, &reply)
+		rf.mu.Lock()
+		if rf.state != PEER_LEADER {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+		go func() {
+			rf.sendAppendEntries(i, &msg, &reply)
+		}()
 	}
 }
 
 func (rf *Raft) resetAlarm() {
-	rf.timeout = time.Now()
+	rf.lastContact = time.Now()
 	rf.wait = 400 + rand.Intn(300)
+}
+
+func (rf *Raft) checkState(expect peerstate) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.state == expect
+}
+
+func (rf *Raft) updateTerm(target int) {
+	rf.currentTerm = target
+	rf.votedFor = -1
+	rf.granted = 0
 }
 
 // Make
@@ -426,13 +464,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.mu.name = strconv.Itoa(me)
 	rand.Seed(time.Now().UnixNano())
 
-	// Your initialization code here (3A, 3B, 3C).
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start ticker goroutine to start elections
-	go rf.ticker()
+	// start raftLoop goroutine to start elections
+	go rf.raftLoop()
 
 	return rf
 }
