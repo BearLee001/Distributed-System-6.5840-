@@ -11,7 +11,6 @@ import (
 	"fmt"
 	//	"bytes"
 	"math/rand"
-	"strconv"
 	"sync"
 	"time"
 
@@ -31,27 +30,20 @@ const (
 )
 
 type Raft struct {
-	mu        DebugMutex          // Lock to protect shared access to this peer's state
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *tester.Persister   // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
+	term      int
+	state     peerstate
 
-	// Your data here (3A, 3B, 3C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-
-	term  int
-	state peerstate
-
-	lastContact time.Time
-	wait        int
-	granted     int
-	votedFor    int
-	leaderIndex int
+	lastContact    time.Time
+	timeOut        time.Duration
+	collectedVotes int
+	votedFor       int
 
 	out          chan raftapi.ApplyMsg
-	todo         chan interface{}
-	logs         []LogEntry // len == 1 or 0
+	logs         []LogEntry
 	lastLogIndex int
 	lastLogTerm  int
 
@@ -62,7 +54,8 @@ type Raft struct {
 
 	commitIndex  int
 	appliedIndex int
-	applyCond    *sync.Cond
+
+	applyCond *sync.Cond
 }
 
 type LogEntry struct {
@@ -78,19 +71,6 @@ func (log *LogEntry) info() string {
 const (
 	HEART_RACE = 100 * time.Millisecond
 )
-
-type DebugMutex struct {
-	mu   sync.Mutex
-	name string
-}
-
-func (m *DebugMutex) Lock() {
-	m.mu.Lock()
-}
-
-func (m *DebugMutex) Unlock() {
-	m.mu.Unlock()
-}
 
 // GetState return term and whether this server
 // believes it is the leader.
@@ -367,40 +347,34 @@ func (rf *Raft) follower() {
 	if !rf.checkState(PEER_FOLLOWER) {
 		return
 	}
-	select {
-	case _ = <-rf.todo:
-		return
-		//panic("[FOLLOWER] should never receive message from user.")
-	default:
+	rf.mu.Lock()
+	lc := rf.lastContact
+	to := rf.timeOut
+	rf.mu.Unlock()
+
+	if time.Since(lc) > to*time.Millisecond {
 		rf.mu.Lock()
-		to := rf.lastContact
-		wt := rf.wait
-		rf.mu.Unlock()
-
-		if time.Since(to) > time.Duration(wt)*time.Millisecond {
-			rf.mu.Lock()
-			rf.resetAlarm()
-			if rf.state != PEER_FOLLOWER {
-				rf.mu.Unlock()
-				return
-			}
-			rf.setState(PEER_CANDIDATE)
-			rf.term++
-			rf.granted = 1
-			rf.votedFor = rf.me
-			curTerm := rf.term
-			whoami := rf.me
-			lastIndex := rf.lastLogIndex
-			lastTerm := rf.lastLogTerm
+		rf.resetAlarm()
+		if rf.state != PEER_FOLLOWER {
 			rf.mu.Unlock()
-
-			rf.requestVoteForme(whoami, curTerm, lastIndex, lastTerm)
 			return
 		}
+		rf.setState(PEER_CANDIDATE)
+		rf.term++
+		rf.collectedVotes = 1
+		rf.votedFor = rf.me
+		curTerm := rf.term
+		whoami := rf.me
+		lastIndex := rf.lastLogIndex
+		lastTerm := rf.lastLogTerm
+		rf.mu.Unlock()
+
+		rf.requestVotes(whoami, curTerm, lastIndex, lastTerm)
+		return
 	}
 }
 
-func (rf *Raft) requestVoteForme(who int, term int, lastLogIndex int, lastLogTerm int) {
+func (rf *Raft) requestVotes(who int, term int, lastLogIndex int, lastLogTerm int) {
 	for i := 0; i < len(rf.peers); i++ {
 		if i == who {
 			continue
@@ -424,9 +398,9 @@ func (rf *Raft) requestVoteForme(who int, term int, lastLogIndex int, lastLogTer
 					return
 				}
 				if reply.Success == true && reply.VoteGranted == true {
-					rf.granted++
+					rf.collectedVotes++
 					// 5 -> 3; 6 -> 4
-					if rf.granted >= len(rf.peers)/2+1 {
+					if rf.collectedVotes >= len(rf.peers)/2+1 {
 						rf.setState(PEER_LEADER)
 						rf.resetNextAndMatchs()
 						rf.resetAlarm()
@@ -455,15 +429,6 @@ func (rf *Raft) resetNextAndMatchs() {
 	}
 }
 
-func (rf *Raft) declareLeader() {
-	rf.mu.Lock()
-	whoami := rf.me
-	curTerm := rf.term
-	DPrintf("[LEADER] peer = %v, term = %v\n", whoami, curTerm)
-	rf.mu.Unlock()
-	rf.broadcast()
-}
-
 func (rf *Raft) candidate() {
 	if !rf.checkState(PEER_CANDIDATE) {
 		return
@@ -471,12 +436,12 @@ func (rf *Raft) candidate() {
 
 	// election out: back to follower
 	rf.mu.Lock()
-	to := rf.lastContact
-	wt := rf.wait
-	if time.Since(to) > time.Duration(wt)*time.Millisecond {
+	defer rf.mu.Unlock()
+	lc := rf.lastContact
+	to := rf.timeOut
+	if time.Since(lc) > to*time.Millisecond {
 		rf.setState(PEER_FOLLOWER)
 	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) leader() {
@@ -566,8 +531,8 @@ func (rf *Raft) replicate(to int) {
 				rf.mu.Lock()
 				DPrintf("[SUCCESS] %v replicate to peer %v, replicated logs = %v, term = %v\n", rf.me, to, entries, term)
 
-				// Note: Not rf.nextIndex[to] = rf.lastLogIndex!!!
-				// Note: leader send append messages ---> succeed -> leader receive a command from outside ---> here
+				// Note: Don't write code like rf.nextIndex[to] = rf.lastLogIndex, here is why:
+				//  leader send append messages ---> succeed -> leader receive a command from outside ---> here
 				rf.matchIndex[to] = pIndex + len(entries)
 				rf.nextIndex[to] = rf.matchIndex[to] + 1
 				rf.mu.Unlock()
@@ -606,7 +571,7 @@ func (rf *Raft) tryCommit() {
 	start := rf.commitIndex + 1
 	end := rf.lastLogIndex
 	var result = rf.commitIndex
-	for i := start; i <= end; i++ { // TODO: Is binary search justified here?
+	for i := start; i <= end; i++ {
 		if rf.checkCommitIndex(i) {
 			result = i
 		}
@@ -635,9 +600,10 @@ func (rf *Raft) broadcast() {
 
 func (rf *Raft) resetAlarm() {
 	rf.lastContact = time.Now()
-	rf.wait = 400 + rand.Intn(300)
+	rf.timeOut = time.Duration(400 + rand.Intn(300))
 }
 
+// Note: Don't use checkState when owning locks
 func (rf *Raft) checkState(expect peerstate) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -647,7 +613,7 @@ func (rf *Raft) checkState(expect peerstate) bool {
 func (rf *Raft) updateTerm(target int) {
 	rf.term = target
 	rf.votedFor = -1
-	rf.granted = 0
+	rf.collectedVotes = 0
 }
 
 func (rf *Raft) setState(s peerstate) {
@@ -687,10 +653,8 @@ func (rf *Raft) initRaftPeer(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.state = PEER_FOLLOWER
 	rf.out = applyCh
-	rf.todo = make(chan interface{})
 	rf.resetAlarm()
 	rf.votedFor = -1
-	rf.mu.name = strconv.Itoa(me)
 
 	rf.lastLogTerm = 0
 	rf.lastLogIndex = 0
@@ -719,18 +683,18 @@ func (rf *Raft) applyLogs() {
 			rf.applyCond.Wait()
 		}
 
-		msgs := make([]raftapi.ApplyMsg, 0, rf.commitIndex-rf.appliedIndex)
+		ms := make([]raftapi.ApplyMsg, 0, rf.commitIndex-rf.appliedIndex)
 		for i := rf.appliedIndex + 1; i <= rf.commitIndex; i++ {
 			log := rf.logs[i]
-			msgs = append(msgs, raftapi.ApplyMsg{CommandValid: true, Command: log.Command, CommandIndex: log.Index})
+			ms = append(ms, raftapi.ApplyMsg{CommandValid: true, Command: log.Command, CommandIndex: log.Index})
 		}
 		rf.appliedIndex = rf.commitIndex
-		DPrintf("%v -> %v\n", rf.me, msgs)
+		DPrintf("%v -> %v\n", rf.me, ms)
 		for i := 0; i <= rf.commitIndex; i++ {
 			DPrintf("[%v] committed logs = %v\n", rf.me, rf.logs[i])
 		}
 		rf.mu.Unlock()
-		for _, msg := range msgs {
+		for _, msg := range ms {
 			rf.out <- msg
 		}
 	}
