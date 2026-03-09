@@ -544,7 +544,7 @@ func (rf *Raft) replicate(to int) {
 		nextIdx := rf.nextIndex[to]
 		pIndex := nextIdx - 1
 		pTerm := rf.logs[pIndex].Term
-		entries := rf.logs[nextIdx:]
+		entries := append([]LogEntry(nil), rf.logs[nextIdx:]...)
 		term := rf.term
 		leader := rf.me
 		leaderCommit := rf.commitIndex
